@@ -6,10 +6,8 @@ import torchvision.transforms as transforms
 import io
 from torchvision.models import vit_b_16
 
-# ---------------- MEMORY OPTIMIZATION ----------------
 torch.set_num_threads(1)
 
-# ---------------- FASTAPI APP ----------------
 app = FastAPI(title="Smart Crop Doctor API")
 
 app.add_middleware(
@@ -20,7 +18,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------- CLASSES ----------------
 class_names = [
     'Apple__Apple_scab','Apple_Black_rot','Apple_Cedar_apple_rust','Apple_healthy',
     'Blueberry_healthy',"Cherry(including_sour)Powdery_mildew","Cherry(including_sour)healthy",
@@ -41,34 +38,36 @@ class_names = [
 
 NUM_CLASSES = 38
 
-# ---------------- IMAGE TRANSFORM ----------------
 transform = transforms.Compose([
     transforms.Resize((224,224)),
     transforms.ToTensor()
 ])
 
-# ---------------- MODEL LOAD (FLOAT16) ----------------
-model = vit_b_16(weights=None)
-model.heads.head = torch.nn.Linear(model.heads.head.in_features, NUM_CLASSES)
+# ---------------- LAZY MODEL LOAD ----------------
+model = None
 
-state_dict = torch.load("vit_plantdisease.pt", map_location="cpu")
-model.load_state_dict(state_dict)
+def load_model():
+    global model
+    if model is None:
+        m = vit_b_16(weights=None)
+        m.heads.head = torch.nn.Linear(m.heads.head.in_features, NUM_CLASSES)
+        m.load_state_dict(torch.load("vit_plantdisease.pt", map_location="cpu"))
+        m = m.half()
+        m.eval()
+        model = m
+    return model
 
-model = model.half()   # reduce memory by ~50%
-model.eval()
-
-# ---------------- PREDICT FUNCTION ----------------
 def predict(image):
+    mdl = load_model()
     img = transform(image).unsqueeze(0).half()
 
     with torch.no_grad():
-        output = model(img)
-        probs = torch.softmax(output, dim=1)
-        confidence, pred = torch.max(probs, 1)
+        out = mdl(img)
+        probs = torch.softmax(out, dim=1)
+        conf, pred = torch.max(probs, 1)
 
-    return class_names[pred.item()], float(confidence.item())
+    return class_names[pred.item()], float(conf.item())
 
-# ---------------- API ROUTES ----------------
 @app.get("/")
 def home():
     return {"message": "Smart Crop Doctor API is running"}
