@@ -6,7 +6,10 @@ import torchvision.transforms as transforms
 import io
 from torchvision.models import vit_b_16
 
-# ---------------- APP ----------------
+# ---------------- MEMORY OPTIMIZATION ----------------
+torch.set_num_threads(1)
+
+# ---------------- FASTAPI APP ----------------
 app = FastAPI(title="Smart Crop Doctor API")
 
 app.add_middleware(
@@ -16,16 +19,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ---------------- MODEL ----------------
-NUM_CLASSES = 38
-
-model = vit_b_16(weights=None)
-model.heads.head = torch.nn.Linear(model.heads.head.in_features, NUM_CLASSES)
-
-state_dict = torch.load("vit_plantdisease.pt", map_location="cpu")
-model.load_state_dict(state_dict, strict=True)
-model.eval()
 
 # ---------------- CLASSES ----------------
 class_names = [
@@ -46,28 +39,48 @@ class_names = [
     'Tomato_Tomato_mosaic_virus','Tomato__healthy'
 ]
 
-# ---------------- TRANSFORM ----------------
+NUM_CLASSES = 38
+
+# ---------------- IMAGE TRANSFORM ----------------
 transform = transforms.Compose([
     transforms.Resize((224,224)),
-    transforms.ToTensor(),
-    transforms.Normalize([0.5]*3,[0.5]*3)
+    transforms.ToTensor()
 ])
 
+# ---------------- MODEL LOAD (FLOAT16) ----------------
+model = vit_b_16(weights=None)
+model.heads.head = torch.nn.Linear(model.heads.head.in_features, NUM_CLASSES)
+
+state_dict = torch.load("vit_plantdisease.pt", map_location="cpu")
+model.load_state_dict(state_dict)
+
+model = model.half()   # reduce memory by ~50%
+model.eval()
+
+# ---------------- PREDICT FUNCTION ----------------
 def predict(image):
-    img = transform(image).unsqueeze(0)
+    img = transform(image).unsqueeze(0).half()
+
     with torch.no_grad():
         output = model(img)
         probs = torch.softmax(output, dim=1)
-        conf, pred = torch.max(probs, 1)
-    return class_names[pred.item()], float(conf.item())
+        confidence, pred = torch.max(probs, 1)
+
+    return class_names[pred.item()], float(confidence.item())
+
+# ---------------- API ROUTES ----------------
+@app.get("/")
+def home():
+    return {"message": "Smart Crop Doctor API is running"}
 
 @app.post("/predict")
 async def predict_crop(file: UploadFile = File(...)):
     image_bytes = await file.read()
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    label, confidence = predict(image)
-    return {"disease": label, "confidence": round(confidence*100,2)}
 
-@app.get("/")
-def home():
-    return {"message": "Smart Crop Doctor API is running"}
+    label, confidence = predict(image)
+
+    return {
+        "disease": label,
+        "confidence": round(confidence * 100, 2)
+    }
